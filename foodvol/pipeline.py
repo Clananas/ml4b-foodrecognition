@@ -47,10 +47,11 @@ class ItemEstimate:
     volume_ml: float
     nutrition: NutritionEstimate
     mask: InstanceMask
-    height_source: str = "geometric_prior"   # 'side_view' | 'class_prior' | 'geometric_prior'
-    shape_source: str = "trained"            # 'class' | 'trained'
     scale_source: str = "class_prior"        # 'class_prior' | 'fallback'
+    mass_source: str = "areal_density"       # 'areal_density' | 'clamped_min' | 'clamped_max'
     cm_per_px: float = 0.0
+    typical_mass_g: float = 0.0
+    mass_range_g: tuple[float, float] = (0.0, 0.0)
     alternatives: list[tuple[str, float]] = field(default_factory=list)  # CLIP top-k
 
     @property
@@ -162,46 +163,53 @@ class FoodVolumePipeline:
         # FastSAM emits the same object at several scales; collapse overlapping ones.
         kept = self._suppress_nested(candidates)
 
-        # 3 + 4. For each item: self-calibrate, then derive mass and macros.
+        # 3 + 4. For each item: self-calibrate, predict mass, clamp to a sanity range.
         for inst, rec in kept:
             info = nutrition.lookup(rec.label)
             cm_per_px, scale_src = self._per_item_scale(inst, info)
             area_cm2 = (cm_per_px ** 2) * inst.area_px
 
-            # Preferred path: if the class has a Nutrition5k-derived mass_per_cm2,
-            # skip the volume detour and go straight from area to mass.
-            # Otherwise fall back to: volume = shape_factor × area × height, mass = V × density.
+            # Direct area→mass via the per-class areal density. This *is* the model.
             if info.mass_per_cm2 is not None:
-                mass_g = float(info.mass_per_cm2 * area_cm2)
-                # Synthesise a plausible volume only for display continuity.
-                volume_ml = float(mass_g / info.density_g_per_ml) if info.density_g_per_ml else float("nan")
-                height_cm, height_src = float("nan"), "n5k_areal"
-                shape_src = "n5k_areal"
-                nut = info.for_mass(mass_g)
+                raw_mass = float(info.mass_per_cm2 * area_cm2)
+            elif info.typical_mass_g is not None:
+                # No areal density learned yet — fall back to the typical mass and
+                # scale by how much the measured area deviates from the typical area.
+                typical_area = (info.typical_long_cm or 10.0) ** 2 * 0.59  # ≈ ellipse area at 0.75 aspect
+                raw_mass = float(info.typical_mass_g * (area_cm2 / typical_area))
             else:
-                if info.typical_height_cm is not None:
-                    height_cm, height_src = float(info.typical_height_cm), "class_prior"
-                else:
-                    height_cm, height_src = self._geometric_height_prior(area_cm2), "geometric_prior"
-                height_cm = float(np.clip(height_cm, 0.3, MAX_HEIGHT_CM))
+                raw_mass = float(info.density_g_per_ml * 100.0 * area_cm2 / 50.0)  # weak default
 
-                if info.shape_factor is not None:
-                    volume_ml = float(info.shape_factor * area_cm2 * height_cm)
-                    shape_src = "class"
-                else:
-                    volume_ml = float(self.volume.predict_volume(area_cm2, height_cm))
-                    shape_src = "trained"
-                nut = info.for_volume(volume_ml)
+            # Clamp to the realistic whole-serving range and remember whether we did.
+            lo = info.mass_min_g if info.mass_min_g is not None else 0.0
+            hi = info.mass_max_g if info.mass_max_g is not None else float("inf")
+            if raw_mass < lo:
+                mass_g, mass_src = lo, "clamped_min"
+            elif raw_mass > hi:
+                mass_g, mass_src = hi, "clamped_max"
+            else:
+                mass_g, mass_src = raw_mass, "areal_density"
+
+            volume_ml = (float(mass_g / info.density_g_per_ml)
+                         if info.density_g_per_ml else float("nan"))
 
             item = ItemEstimate(
                 food_class=rec.label, confidence=rec.score, area_cm2=area_cm2,
-                height_cm=height_cm, volume_ml=volume_ml, nutrition=nut, mask=inst,
-                height_source=height_src, shape_source=shape_src,
+                height_cm=float("nan"), volume_ml=volume_ml,
+                nutrition=info.for_mass(mass_g), mask=inst,
                 alternatives=[(l, s) for l, s in rec.top if l != rec.label][:3],
             )
             item.scale_source = scale_src
+            item.mass_source = mass_src
             item.cm_per_px = cm_per_px
+            item.typical_mass_g = info.typical_mass_g or 0.0
+            item.mass_range_g = (lo, hi if hi != float("inf") else 0.0)
             result.items.append(item)
+            if mass_src in ("clamped_min", "clamped_max"):
+                result.notes.append(
+                    f"{rec.label}: raw estimate {raw_mass:.0f} g was outside the "
+                    f"plausible range ({lo:.0f}-{hi:.0f} g); clamped to {mass_g:.0f} g."
+                )
 
         if not result.items:
             result.notes.append(

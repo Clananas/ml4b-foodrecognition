@@ -11,9 +11,6 @@ macros with an annotated overlay.
 """
 from __future__ import annotations
 
-import os
-import tempfile
-
 import cv2
 import numpy as np
 import pandas as pd
@@ -21,7 +18,6 @@ import streamlit as st
 
 from foodvol import config
 from foodvol.pipeline import FoodVolumePipeline, PlateEstimate
-from foodvol.video import extract_frames, select_views
 
 st.set_page_config(page_title="Food Volume & Calorie Estimator", page_icon="🍽️", layout="wide")
 
@@ -39,24 +35,6 @@ def _read_upload(uploaded) -> np.ndarray:
     """Decode an uploaded image to a BGR array."""
     data = np.frombuffer(uploaded.getvalue(), np.uint8)
     return cv2.imdecode(data, cv2.IMREAD_COLOR)
-
-
-@st.cache_data(show_spinner="Selecting top & side frames from the video…")
-def _views_from_video(video_bytes: bytes, suffix: str):
-    """Extract frames and pick a top + side view. Cached on the raw video bytes."""
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tf:
-        tf.write(video_bytes)
-        path = tf.name
-    try:
-        frames = extract_frames(path, max_frames=24)
-        # Plate diameter does not affect view *selection* (roundness is scale-free).
-        return select_views(frames, plate_diameter_cm=26.0)
-    finally:
-        os.unlink(path)
-
-
-def _rgb(bgr: np.ndarray) -> np.ndarray:
-    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
 
 
 def _overlay(top_bgr: np.ndarray, result: PlateEstimate) -> np.ndarray:
@@ -90,44 +68,21 @@ st.sidebar.caption(
 # --- Header --------------------------------------------------------------------
 st.title("🍽️ Food Volume & Calorie Estimator")
 st.write(
-    "Recognises the food in a photo and estimates its **mass, calories and macros** "
-    "from a single image — **no plate, coin or measuring marker required**. "
-    "Just upload a photo (or short video) of the food."
+    "Upload a top-down photo of your food. The app recognises the dish and "
+    "estimates its **mass, calories and macros**."
 )
 
 # --- Input ---------------------------------------------------------------------
-mode = st.radio("Input", ["Photos", "Video"], horizontal=True)
 top_bgr: np.ndarray | None = None
 side_bgr: np.ndarray | None = None
-views = None
 
-if mode == "Photos":
-    c1, c2 = st.columns(2)
-    top_file = c1.file_uploader("Top-down photo (required)", type=["jpg", "jpeg", "png"])
-    side_file = c2.file_uploader("Side photo (optional)", type=["jpg", "jpeg", "png"])
-    if top_file is not None:
-        top_bgr = _read_upload(top_file)
-    if side_file is not None:
-        side_bgr = _read_upload(side_file)
-else:
-    video_file = st.file_uploader("Video panning around the plate",
-                                  type=["mp4", "mov", "avi", "m4v"])
-    if video_file is not None:
-        suffix = os.path.splitext(video_file.name)[1] or ".mp4"
-        views = _views_from_video(video_file.getvalue(), suffix)
-        top_bgr, side_bgr = views.top_frame, views.side_frame
-        if top_bgr is None:
-            st.error("Could not read frames from the video.")
-        else:
-            st.caption(f"Picked from {views.n_frames} sampled frames "
-                       f"(plate detected in {views.n_with_plate}).")
-            vc1, vc2 = st.columns(2)
-            cap_t = f"Top view (roundness {views.top.roundness:.2f})" if views.top else "Top view (fallback: sharpest frame)"
-            vc1.image(_rgb(top_bgr), caption=cap_t, use_container_width=True)
-            if side_bgr is not None and views.side is not None:
-                vc2.image(_rgb(side_bgr),
-                          caption=f"Side view (roundness {views.side.roundness:.2f})",
-                          use_container_width=True)
+c1, c2 = st.columns(2)
+top_file = c1.file_uploader("Top-down photo (required)", type=["jpg", "jpeg", "png"])
+side_file = c2.file_uploader("Side photo (optional)", type=["jpg", "jpeg", "png"])
+if top_file is not None:
+    top_bgr = _read_upload(top_file)
+if side_file is not None:
+    side_bgr = _read_upload(side_file)
 
 # --- Run -----------------------------------------------------------------------
 if top_bgr is not None and st.button("Estimate", type="primary"):
@@ -156,15 +111,16 @@ if top_bgr is not None and st.button("Estimate", type="primary"):
     # Per-item breakdown.
     def _alts(it):
         return ", ".join(f"{lbl} {sc:.0%}" for lbl, sc in it.alternatives) or "—"
+    def _range(it):
+        lo, hi = it.mass_range_g
+        return f"{lo:.0f}–{hi:.0f} g" if lo and hi else "—"
     table = pd.DataFrame([{
         "Food": it.food_class,
         "Confidence": f"{it.confidence:.0%}",
         "Also considered": _alts(it),
         "Area (cm²)": round(it.area_cm2, 1),
-        "Height (cm)": round(it.height_cm, 1),
-        "h source": it.height_source,
-        "Volume (mL)": round(it.volume_ml, 0),
         "Mass (g)": round(it.mass_g, 0),
+        "Plausible range": _range(it),
         "Calories (kcal)": round(it.nutrition.kcal, 0),
         "Protein (g)": round(it.nutrition.protein_g, 1),
         "Carbs (g)": round(it.nutrition.carbs_g, 1),

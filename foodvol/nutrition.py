@@ -29,27 +29,23 @@ def _normalise(label: str) -> str:
 
 @dataclass(frozen=True)
 class NutritionInfo:
-    """Per-class nutritional + portion reference.
+    """Per-class nutrition + portion reference.
 
-    The portion fields are *priors* used by the volume stage when class-specific
-    shape information is known. They are None for classes without an entry, in which
-    case the trained class-agnostic regressor and the generic height prior are used.
+    All fields besides the nutrition basics are *priors* describing a realistic
+    whole serving (a whole apple, one slice of pizza, half an avocado). The
+    pipeline uses them to convert a measured pixel footprint into mass — with
+    ``mass_min_g`` / ``mass_max_g`` acting as plausibility bounds.
 
     Attributes
     ----------
-    typical_height_cm : a sensible thickness for a typical serving (e.g. ~1.5 cm for
-        pizza, ~3.5 cm for a bowl of soup). Used as the height prior when no side view
-        is available.
-    shape_factor : the ratio of true volume to the bounding prism ``area × height``.
-        Pizza ≈ 0.9 (near a prism), a half-spherical apple ≈ 0.55, a bowl ≈ 1.0.
     typical_long_cm : the long side of the top-view bounding box for a typical
-        serving (e.g. ~16 cm for a pizza slice or banana, ~9.8 cm for an apple).
-        The pipeline uses this to self-calibrate cm/px from the recognised class
-        when no plate is in the image.
-    mass_per_cm2 : the *areal* density — grams per square centimetre of footprint.
-        When available (from Nutrition5k for 16 common classes) the pipeline
-        skips the volume detour entirely: mass = mass_per_cm2 × area_cm2. This
-        is more direct and more accurate than going through volume × density.
+        serving. Used to self-calibrate cm per pixel from the recognised class.
+    typical_mass_g : typical mass of one serving (a whole banana ~ 120 g, a slice
+        of pizza ~ 130 g, half an avocado ~ 100 g, …).
+    mass_min_g / mass_max_g : the plausible whole-serving mass range; the pipeline
+        clamps its estimate to this and warns when clamping happens.
+    mass_per_cm2 : derived from ``typical_mass_g`` divided by the typical area;
+        used as the area→mass predictor (skips the volume detour entirely).
     """
 
     food_class: str
@@ -58,9 +54,10 @@ class NutritionInfo:
     protein_g_per_100g: float
     carbs_g_per_100g: float
     fat_g_per_100g: float
-    typical_height_cm: Optional[float] = None
-    shape_factor: Optional[float] = None
     typical_long_cm: Optional[float] = None
+    typical_mass_g: Optional[float] = None
+    mass_min_g: Optional[float] = None
+    mass_max_g: Optional[float] = None
     mass_per_cm2: Optional[float] = None
     is_default: bool = False
 
@@ -123,9 +120,10 @@ def _table() -> dict[str, NutritionInfo]:
                 protein_g_per_100g=float(row["protein_g_per_100g"]),
                 carbs_g_per_100g=float(row["carbs_g_per_100g"]),
                 fat_g_per_100g=float(row["fat_g_per_100g"]),
-                typical_height_cm=_optional_float(row, "typical_height_cm"),
-                shape_factor=_optional_float(row, "shape_factor"),
                 typical_long_cm=_optional_float(row, "typical_long_cm"),
+                typical_mass_g=_optional_float(row, "typical_mass_g"),
+                mass_min_g=_optional_float(row, "mass_min_g"),
+                mass_max_g=_optional_float(row, "mass_max_g"),
                 mass_per_cm2=_optional_float(row, "mass_per_cm2"),
             )
     return table

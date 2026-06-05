@@ -42,6 +42,23 @@ NONFOOD_LABELS = [
 
 HYPOTHESIS = "a photo of {}."
 
+# Some classes benefit from a more descriptive natural-language prompt than the
+# bare class name. CLIP is sensitive to wording — "a whole avocado" scores much
+# better on a whole-fruit photo than "avocado" alone.
+PROMPT_OVERRIDES = {
+    "apple":            "a whole apple",
+    "banana":           "a whole banana",
+    "avocado":          "a whole avocado with skin",
+    "half_avocado":     "half an avocado, cut open showing the pit",
+    "watermelon_wedge": "a wedge of watermelon",
+    "pineapple_slice":  "a slice of pineapple",
+    "pizza_slice":      "a slice of pizza",
+    "pizza_whole":      "a whole pizza",
+    "boiled_egg":       "a boiled egg",
+    "fried_egg":        "a fried egg",
+    "egg":              "an egg",
+}
+
 
 @dataclass
 class Recognition:
@@ -77,9 +94,14 @@ class FoodRecognizer:
 
     # --- label set -------------------------------------------------------------
     def _build_labels(self) -> tuple[list[str], list[str], np.ndarray]:
-        """Return (prompt_texts, nutrition_keys, is_food_mask)."""
+        """Return (prompt_texts, nutrition_keys, is_food_mask).
+
+        Food prompts use ``PROMPT_OVERRIDES`` when available — natural-language
+        descriptions like "half an avocado, cut open" help CLIP distinguish
+        whole vs. cut produce, which then drives the correct portion prior.
+        """
         food_keys = nutrition.known_classes()
-        food_texts = [k.replace("_", " ") for k in food_keys]
+        food_texts = [PROMPT_OVERRIDES.get(k, k.replace("_", " ")) for k in food_keys]
         keys = food_keys + NONFOOD_LABELS
         texts = food_texts + NONFOOD_LABELS
         is_food = np.array([True] * len(food_keys) + [False] * len(NONFOOD_LABELS))
