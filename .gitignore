@@ -11,8 +11,9 @@ __pycache__/
 # --- Large model weights (re-downloaded on first use) ---
 models/
 
-# --- Datasets (downloaded via data/download_ecustfd.py — ~125 MB) ---
-data/ECUSTFD/
+# --- Datasets (downloaded on demand) ---
+data/ECUSTFD/                          # ~125 MB, fetched by data/download_ecustfd.py
+data/Nutrition5k/                      # ~162 MB, fetched by data/download_nutrition5k.py
 data/*.zip
 data/own_dataset/
 
