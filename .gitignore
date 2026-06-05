@@ -11,9 +11,11 @@ __pycache__/
 # --- Large model weights (re-downloaded on first use) ---
 models/
 
-# --- Datasets (downloaded on demand) ---
-data/ECUSTFD/                          # ~125 MB, fetched by data/download_ecustfd.py
-data/Nutrition5k/                      # ~162 MB, fetched by data/download_nutrition5k.py
+# --- Datasets (downloaded on demand by scripts in data/) ---
+# Comments must NOT be on the same line as the pattern, otherwise git
+# treats the whole line including the comment as one pattern.
+data/ECUSTFD/
+data/Nutrition5k/
 data/*.zip
 data/own_dataset/
 
@@ -22,8 +24,6 @@ artifacts/*.png
 
 # Trained models and cached features ARE committed — they let the app run
 # immediately after a clone, and they document the latest training result.
-# Override if a single file ever grows large:
-#   artifacts/some_huge_file.bin
 
 # --- OS / editor ---
 .DS_Store
