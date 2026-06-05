@@ -27,8 +27,11 @@ _PALETTE = [(60, 60, 255), (60, 200, 60), (255, 160, 0), (200, 60, 200),
 
 
 @st.cache_resource(show_spinner="Loading models (first run downloads weights)…")
+def _get_pipeline_for(chessboard_square_cm: float) -> FoodVolumePipeline:
+    return FoodVolumePipeline(chessboard_square_cm=chessboard_square_cm)
+
 def get_pipeline() -> FoodVolumePipeline:
-    return FoodVolumePipeline()
+    return _get_pipeline_for(chessboard_cm)
 
 
 def _read_upload(uploaded) -> np.ndarray:
@@ -56,13 +59,21 @@ def _overlay(top_bgr: np.ndarray, result: PlateEstimate) -> np.ndarray:
 st.sidebar.header("Settings")
 min_conf = st.sidebar.slider(
     "Min. classification confidence", 0.0, 0.9, 0.0, 0.05,
-    help="Drop recognitions with score below this. 0 = keep all.",
+    help="Drop recognitions with CLIP score below this. 0 = keep all.",
+)
+chessboard_cm = st.sidebar.number_input(
+    "Chessboard square size (cm)", min_value=0.5, max_value=10.0,
+    value=2.0, step=0.1,
+    help="If a chessboard calibration pattern is visible in the photo, the app "
+         "uses it as the metric scale automatically. Set this to the real-world "
+         "edge length of one square on your printed board.",
 )
 st.sidebar.caption(f"Compute device: **{config.get_device()}**")
 st.sidebar.caption(
-    "**Scale**: the app self-calibrates from the recognised food class — no plate, "
-    "coin or marker needed. Accuracy depends on the recognised class matching a "
-    "typical serving size."
+    "**How the scale is found**: the app first looks for a chessboard pattern. "
+    "If one is in the photo, the size measurement is metric and accurate. If not, "
+    "the scale is inferred from the recognised food class — that's less reliable "
+    "(every serving gets treated as a typical one)."
 )
 
 # --- Header --------------------------------------------------------------------
@@ -116,11 +127,13 @@ if top_bgr is not None and st.button("Estimate", type="primary"):
         return f"{lo:.0f}–{hi:.0f} g" if lo and hi else "—"
     table = pd.DataFrame([{
         "Food": it.food_class,
-        "Confidence": f"{it.confidence:.0%}",
+        "Class conf": f"{it.confidence:.0%}",
+        "Mass conf": f"{it.quantity_confidence:.0%}",
         "Also considered": _alts(it),
         "Area (cm²)": round(it.area_cm2, 1),
         "Mass (g)": round(it.mass_g, 0),
         "Plausible range": _range(it),
+        "Scale": it.scale_source,
         "Calories (kcal)": round(it.nutrition.kcal, 0),
         "Protein (g)": round(it.nutrition.protein_g, 1),
         "Carbs (g)": round(it.nutrition.carbs_g, 1),

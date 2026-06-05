@@ -47,11 +47,12 @@ class ItemEstimate:
     volume_ml: float
     nutrition: NutritionEstimate
     mask: InstanceMask
-    scale_source: str = "class_prior"        # 'class_prior' | 'fallback'
+    scale_source: str = "class_prior"        # 'class_prior' | 'chessboard' | 'reranked'
     mass_source: str = "areal_density"       # 'areal_density' | 'clamped_min' | 'clamped_max'
     cm_per_px: float = 0.0
     typical_mass_g: float = 0.0
     mass_range_g: tuple[float, float] = (0.0, 0.0)
+    quantity_confidence: float = 0.0         # 0..1, how trustworthy *the mass* is
     alternatives: list[tuple[str, float]] = field(default_factory=list)  # CLIP top-k
 
     @property
@@ -65,6 +66,7 @@ class PlateEstimate:
 
     items: list[ItemEstimate] = field(default_factory=list)
     height_source: str = "none"           # kept for backward compat with old UI code
+    chessboard_scale_cm_per_px: float = 0.0  # >0 if a chessboard was used as scale
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -113,11 +115,13 @@ class FoodVolumePipeline:
         self,
         volume_model_path: Path = config.VOLUME_MODEL_PATH,
         device: Optional[str] = None,
+        chessboard_square_cm: float = 2.0,
     ):
         self.segmenter = FoodSegmenter(device=device)
         self.recognizer = FoodRecognizer(device=device)
         self.volume = VolumeEstimator.load(volume_model_path)
         self.device = device
+        self.chessboard_square_cm = float(chessboard_square_cm)
 
     # --- main entry point ------------------------------------------------------
     def estimate(
@@ -144,6 +148,18 @@ class FoodVolumePipeline:
         result = PlateEstimate()
         result.height_source = "class_prior"
 
+        # 0. Opportunistic: detect a chessboard. If found, it gives a real cm/px
+        #    independent of the recognised class — far more reliable than
+        #    deriving the scale from class priors.
+        from .chessboard import detect_scale as _detect_chessboard_scale
+        cb = _detect_chessboard_scale(top, square_cm=self.chessboard_square_cm)
+        if cb is not None:
+            result.chessboard_scale_cm_per_px = cb.cm_per_px
+            result.notes.append(
+                f"Chessboard detected ({cb.pattern[0]}×{cb.pattern[1]} corners, "
+                f"square = {cb.square_cm:.1f} cm) — using it as the metric scale."
+            )
+
         # 1. Segment the whole frame; no plate-interior restriction.
         segments = self.segmenter.segment(top, interior_mask=None)[:MAX_SEGMENTS]
         if not segments:
@@ -163,24 +179,15 @@ class FoodVolumePipeline:
         # FastSAM emits the same object at several scales; collapse overlapping ones.
         kept = self._suppress_nested(candidates)
 
-        # 3 + 4. For each item: self-calibrate, predict mass, clamp to a sanity range.
+        # 3 + 4. For each item: self-calibrate, predict mass, sanity-rerank, clamp.
         for inst, rec in kept:
-            info = nutrition.lookup(rec.label)
-            cm_per_px, scale_src = self._per_item_scale(inst, info)
-            area_cm2 = (cm_per_px ** 2) * inst.area_px
+            # Try the top-1 class; if its plausible range can't contain the measurement,
+            # re-evaluate the same area against every food candidate in CLIP's top-k
+            # and prefer one whose plausible range *does* contain the raw estimate.
+            chosen_label, chosen_info, cm_per_px, scale_src, area_cm2, raw_mass, was_reranked \
+                = self._pick_class_and_scale(inst, rec, cb)
 
-            # Direct area→mass via the per-class areal density. This *is* the model.
-            if info.mass_per_cm2 is not None:
-                raw_mass = float(info.mass_per_cm2 * area_cm2)
-            elif info.typical_mass_g is not None:
-                # No areal density learned yet — fall back to the typical mass and
-                # scale by how much the measured area deviates from the typical area.
-                typical_area = (info.typical_long_cm or 10.0) ** 2 * 0.59  # ≈ ellipse area at 0.75 aspect
-                raw_mass = float(info.typical_mass_g * (area_cm2 / typical_area))
-            else:
-                raw_mass = float(info.density_g_per_ml * 100.0 * area_cm2 / 50.0)  # weak default
-
-            # Clamp to the realistic whole-serving range and remember whether we did.
+            info = chosen_info
             lo = info.mass_min_g if info.mass_min_g is not None else 0.0
             hi = info.mass_max_g if info.mass_max_g is not None else float("inf")
             if raw_mass < lo:
@@ -193,21 +200,36 @@ class FoodVolumePipeline:
             volume_ml = (float(mass_g / info.density_g_per_ml)
                          if info.density_g_per_ml else float("nan"))
 
+            # Quantity confidence: how trustworthy is *the mass*?
+            q_conf = self._quantity_confidence(
+                clip_score=rec.score, raw_mass=raw_mass, lo=lo, hi=hi,
+                typical=info.typical_mass_g or (lo + hi) / 2 if hi != float("inf") else lo,
+                scale_src=scale_src,
+                was_reranked=was_reranked,
+            )
+
             item = ItemEstimate(
-                food_class=rec.label, confidence=rec.score, area_cm2=area_cm2,
+                food_class=chosen_label, confidence=rec.score, area_cm2=area_cm2,
                 height_cm=float("nan"), volume_ml=volume_ml,
                 nutrition=info.for_mass(mass_g), mask=inst,
-                alternatives=[(l, s) for l, s in rec.top if l != rec.label][:3],
+                alternatives=[(l, s) for l, s in rec.top if l != chosen_label][:3],
             )
-            item.scale_source = scale_src
+            item.scale_source = "reranked" if was_reranked else scale_src
             item.mass_source = mass_src
             item.cm_per_px = cm_per_px
             item.typical_mass_g = info.typical_mass_g or 0.0
             item.mass_range_g = (lo, hi if hi != float("inf") else 0.0)
+            item.quantity_confidence = q_conf
             result.items.append(item)
+
+            if was_reranked:
+                result.notes.append(
+                    f"Top-1 class '{rec.label}' didn't fit the measured size; "
+                    f"re-ranked to '{chosen_label}' from CLIP's alternatives."
+                )
             if mass_src in ("clamped_min", "clamped_max"):
                 result.notes.append(
-                    f"{rec.label}: raw estimate {raw_mass:.0f} g was outside the "
+                    f"{chosen_label}: raw estimate {raw_mass:.0f} g was outside the "
                     f"plausible range ({lo:.0f}-{hi:.0f} g); clamped to {mass_g:.0f} g."
                 )
 
@@ -226,17 +248,104 @@ class FoodVolumePipeline:
 
     @staticmethod
     def _per_item_scale(inst: "InstanceMask", info) -> tuple[float, str]:
-        """Return (cm/px, source) for a single item.
+        """Return (cm/px, source) for a single item, *class-only* fallback.
 
         Compares the item's bounding-box long side in pixels to the class's
-        ``typical_long_cm``. Falls back to a coarse default if the class has no
-        size entry (the resulting mass should then be treated as a guess).
+        ``typical_long_cm``. Used when no chessboard is detected.
         """
-        long_side_px = max(inst.bbox[2], inst.bbox[3])  # max(width, height) in px
+        long_side_px = max(inst.bbox[2], inst.bbox[3])
         if info.typical_long_cm is not None and long_side_px > 0:
             return float(info.typical_long_cm / long_side_px), "class_prior"
-        # Fallback: assume the item is roughly 10 cm long. Very rough.
         return float(10.0 / max(long_side_px, 1)), "fallback"
+
+    def _pick_class_and_scale(self, inst, rec, chessboard):
+        """Decide on (class, cm/px) using all evidence.
+
+        Strategy:
+        1. Compute cm/px. If a chessboard is present, use that scale (real metric);
+           else fall back to the recognised class's typical_long_cm.
+        2. Compute raw_mass = mass_per_cm2[top-1] × area_cm2.
+        3. If raw_mass fits the top-1 plausible [min, max] range → keep top-1.
+        4. Otherwise look through CLIP's other top-k candidates. If one of them
+           has a plausible range that *contains* the raw_mass (re-scaled to its
+           own areal density), pick it. This is what saves a Muffin from being
+           called a Blueberry: when the recognised "blueberry" range [1,2]g can
+           never explain a 30 cm² object, but "cupcakes" [60,180]g can.
+        5. If no candidate fits, keep top-1 and let the clamp + warning fire.
+        """
+        candidates = [(rec.label, rec.score)] + [(l, s) for l, s in rec.top if l != rec.label]
+        candidates = candidates[:5]   # at most 5 candidates
+
+        def evaluate(label):
+            info = nutrition.lookup(label)
+            if chessboard is not None:
+                cm_per_px = chessboard.cm_per_px
+                scale_src = "chessboard"
+            else:
+                cm_per_px, scale_src = self._per_item_scale(inst, info)
+            area_cm2 = (cm_per_px ** 2) * inst.area_px
+            raw_mass = self._raw_mass(info, area_cm2)
+            return info, cm_per_px, scale_src, area_cm2, raw_mass
+
+        # Evaluate top-1 first.
+        top_label = candidates[0][0]
+        info, cm_per_px, scale_src, area_cm2, raw_mass = evaluate(top_label)
+        lo = info.mass_min_g if info.mass_min_g is not None else 0.0
+        hi = info.mass_max_g if info.mass_max_g is not None else float("inf")
+        if lo <= raw_mass <= hi:
+            return top_label, info, cm_per_px, scale_src, area_cm2, raw_mass, False
+
+        # Top-1 fails plausibility. Try alternatives.
+        for alt_label, _ in candidates[1:]:
+            a_info, a_cm, a_src, a_area, a_mass = evaluate(alt_label)
+            a_lo = a_info.mass_min_g if a_info.mass_min_g is not None else 0.0
+            a_hi = a_info.mass_max_g if a_info.mass_max_g is not None else float("inf")
+            if a_lo <= a_mass <= a_hi:
+                return alt_label, a_info, a_cm, a_src, a_area, a_mass, True
+
+        # No candidate fits; stay with top-1 and let the clamp fire.
+        return top_label, info, cm_per_px, scale_src, area_cm2, raw_mass, False
+
+    @staticmethod
+    def _raw_mass(info, area_cm2: float) -> float:
+        """The 'before-clamp' mass estimate for one (class, area)."""
+        if info.mass_per_cm2 is not None:
+            return float(info.mass_per_cm2 * area_cm2)
+        if info.typical_mass_g is not None:
+            typical_area = (info.typical_long_cm or 10.0) ** 2 * 0.59
+            return float(info.typical_mass_g * (area_cm2 / typical_area))
+        return float(info.density_g_per_ml * 100.0 * area_cm2 / 50.0)
+
+    @staticmethod
+    def _quantity_confidence(*, clip_score, raw_mass, lo, hi, typical,
+                             scale_src, was_reranked):
+        """0..1 confidence in the *mass*, not just the class label.
+
+        Combines:
+        - CLIP score (how sure is the recogniser about *some* class)
+        - Plausibility: did the raw estimate fall inside the plausible range,
+          and how close was it to the class's typical value
+        - Scale source: a chessboard scale is much more trustworthy than a
+          class-prior scale (which is just a guess about typical size)
+        - Re-ranking penalty: a re-ranked class is by construction less certain
+          than CLIP's top pick
+        """
+        # Plausibility.
+        if hi == float("inf"):
+            plaus = 0.5
+        elif lo <= raw_mass <= hi:
+            band = max(hi - lo, 1e-6)
+            dist = abs(raw_mass - typical) / band
+            plaus = float(np.clip(1.0 - 0.6 * dist, 0.3, 1.0))
+        else:
+            plaus = 0.15   # clamped — we know the answer is wrong, just bounded
+
+        scale_factor = {"chessboard": 1.0, "class_prior": 0.7,
+                        "reranked": 0.7, "fallback": 0.4}.get(scale_src, 0.5)
+
+        clip_factor = float(np.clip(clip_score, 0.0, 1.0))
+        rerank_factor = 0.75 if was_reranked else 1.0
+        return float(np.clip(clip_factor * plaus * scale_factor * rerank_factor, 0.0, 1.0))
 
     @staticmethod
     def _suppress_nested(candidates, containment_thresh: float = 0.6):

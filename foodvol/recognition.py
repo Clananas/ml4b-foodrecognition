@@ -57,6 +57,11 @@ PROMPT_OVERRIDES = {
     "boiled_egg":       "a boiled egg",
     "fried_egg":        "a fried egg",
     "egg":              "an egg",
+    "muffin":           "a muffin",
+    "blueberry_muffin": "a blueberry muffin with berries on top",
+    "cupcake":          "a frosted cupcake",
+    "donut":            "a donut with a hole",
+    "cookie":           "a single cookie",
 }
 
 
