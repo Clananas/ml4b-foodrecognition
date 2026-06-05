@@ -1,0 +1,41 @@
+# Runtime dependencies for the food-volume estimation project.
+# Tested on Python 3.12 (Apple Silicon, MPS). For exact pinned versions see
+# requirements-lock.txt.
+
+# --- Core scientific stack ---
+numpy>=1.26,<2.3
+scipy
+scikit-learn
+pandas
+matplotlib
+pillow
+opencv-python
+
+# --- Deep learning (CPU / Apple-MPS / CUDA) ---
+torch>=2.2
+torchvision
+
+# --- Pretrained perception models ---
+ultralytics          # FastSAM / MobileSAM instance segmentation
+transformers         # Depth Anything V2, food image classifier
+timm                 # backbone zoo used by transformers/ultralytics
+safetensors
+huggingface-hub
+
+# --- App, data download ---
+streamlit            # web UI
+gdown                # download datasets hosted on Google Drive
+requests
+tqdm
+pyyaml
+joblib               # persist the trained volume regressor
+xlrd==1.2.0          # read ECUSTFD's legacy .xls ground-truth file (pinned: 2.x drops .xls)
+
+# --- Notebook ---
+jupyterlab           # run / edit the feasibility notebook
+ipykernel            # Jupyter kernel for the venv
+nbconvert            # execute notebooks headlessly
+nbformat
+
+# --- Dev / testing ---
+pytest

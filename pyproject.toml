@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "foodvol"
+version = "0.1.0"
+description = "Food recognition and portion (volume / mass / calorie) estimation"
+readme = "README.md"
+requires-python = ">=3.10"
+# Runtime dependencies are managed via requirements.txt (and requirements-lock.txt
+# for exact pins), so they are intentionally not duplicated here.
+
+[tool.setuptools]
+packages = ["foodvol", "foodvol.data"]
+
+[tool.setuptools.package-data]
+"foodvol.data" = ["*.csv"]

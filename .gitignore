@@ -1,0 +1,30 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# --- Virtual environment ---
+.venv/
+
+# --- Large model weights (re-downloaded on first use) ---
+models/
+
+# --- Datasets (downloaded via data/download_ecustfd.py — ~125 MB) ---
+data/ECUSTFD/
+data/*.zip
+data/own_dataset/
+
+# --- Build artifacts that aren't useful to share ---
+artifacts/*.png
+
+# Trained models and cached features ARE committed — they let the app run
+# immediately after a clone, and they document the latest training result.
+# Override if a single file ever grows large:
+#   artifacts/some_huge_file.bin
+
+# --- OS / editor ---
+.DS_Store
+.vscode/
+.idea/
