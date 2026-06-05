@@ -20,7 +20,6 @@ import pandas as pd
 import streamlit as st
 
 from foodvol import config
-from foodvol.calibration import CalibrationError
 from foodvol.pipeline import FoodVolumePipeline, PlateEstimate
 from foodvol.video import extract_frames, select_views
 
@@ -61,14 +60,8 @@ def _rgb(bgr: np.ndarray) -> np.ndarray:
 
 
 def _overlay(top_bgr: np.ndarray, result: PlateEstimate) -> np.ndarray:
-    """Draw the plate ellipse and each item's mask outline + label."""
+    """Draw each item's mask outline + label."""
     vis = top_bgr.copy()
-    calib = result.calibration_top
-    if calib is not None:
-        cx, cy = map(int, calib.center)
-        major, minor = calib.axes
-        cv2.ellipse(vis, (cx, cy), (int(major / 2), int(minor / 2)),
-                    calib.angle_deg, 0, 360, (255, 255, 255), 2)
     for idx, item in enumerate(result.items):
         color = _PALETTE[idx % len(_PALETTE)]
         mask = item.mask.mask.astype(np.uint8)
@@ -83,26 +76,23 @@ def _overlay(top_bgr: np.ndarray, result: PlateEstimate) -> np.ndarray:
 
 # --- Sidebar controls ----------------------------------------------------------
 st.sidebar.header("Settings")
-preset = st.sidebar.selectbox(
-    "Plate size preset",
-    ["Custom", "Small (20 cm)", "Dinner (26 cm)", "Large (30 cm)"], index=2,
+min_conf = st.sidebar.slider(
+    "Min. classification confidence", 0.0, 0.9, 0.0, 0.05,
+    help="Drop recognitions with score below this. 0 = keep all.",
 )
-_preset_cm = {"Small (20 cm)": 20.0, "Dinner (26 cm)": 26.0, "Large (30 cm)": 30.0}
-plate_diameter = st.sidebar.number_input(
-    "Plate diameter (cm)", min_value=8.0, max_value=45.0,
-    value=float(_preset_cm.get(preset, 26.0)), step=0.5,
-    help="The metric reference. Measure the outer rim of your plate.",
-)
-min_conf = st.sidebar.slider("Min. classification confidence", 0.0, 0.9, 0.0, 0.05)
 st.sidebar.caption(f"Compute device: **{config.get_device()}**")
+st.sidebar.caption(
+    "**Scale**: the app self-calibrates from the recognised food class — no plate, "
+    "coin or marker needed. Accuracy depends on the recognised class matching a "
+    "typical serving size."
+)
 
 # --- Header --------------------------------------------------------------------
 st.title("🍽️ Food Volume & Calorie Estimator")
 st.write(
-    "Recognises the **dish** (101 common foods — pizza, sushi, salads, …) and estimates "
-    "**portion size**: volume → mass → **calories and macronutrients**. Provide a "
-    "**top-down photo** (plus an optional side photo) **or a short video** panning around "
-    "the plate. The plate is the metric reference that makes portion size measurable."
+    "Recognises the food in a photo and estimates its **mass, calories and macros** "
+    "from a single image — **no plate, coin or measuring marker required**. "
+    "Just upload a photo (or short video) of the food."
 )
 
 # --- Input ---------------------------------------------------------------------
@@ -142,16 +132,11 @@ else:
 # --- Run -----------------------------------------------------------------------
 if top_bgr is not None and st.button("Estimate", type="primary"):
     pipe = get_pipeline()
-    try:
-        with st.spinner("Analysing plate…"):
-            result = pipe.estimate(top_bgr, side_image=side_bgr,
-                                   plate_diameter_cm=plate_diameter, min_confidence=min_conf)
-    except CalibrationError as exc:
-        st.error(f"Could not calibrate from the plate: {exc}")
-        st.stop()
+    with st.spinner("Analysing image…"):
+        result = pipe.estimate(top_bgr, side_image=side_bgr, min_confidence=min_conf)
 
     if not result.items:
-        st.warning("No food detected on the plate. Try a clearer top-down photo.")
+        st.warning("No food recognised in the image. Try a clearer photo.")
         for note in result.notes:
             st.caption(note)
         st.stop()
@@ -188,12 +173,10 @@ if top_bgr is not None and st.button("Estimate", type="primary"):
     st.dataframe(table, use_container_width=True, hide_index=True)
 
     # Transparency: where the numbers came from and their caveats.
-    cal = result.calibration_top
-    st.caption(
-        f"Scale: {cal.cm_per_px:.4f} cm/px (plate detected via '{cal.method}', "
-        f"Ø {cal.diameter_px:.0f} px = {plate_diameter:.1f} cm). "
-        f"Height source: **{result.height_source}**."
-    )
+    if result.items:
+        scales = ", ".join(f"{it.food_class}: {it.cm_per_px:.4f} cm/px ({it.scale_source})"
+                           for it in result.items)
+        st.caption(f"Per-item scale (self-calibrated): {scales}")
     for note in result.notes:
         st.caption("ℹ️ " + note)
     if any(it.nutrition.is_default for it in result.items):

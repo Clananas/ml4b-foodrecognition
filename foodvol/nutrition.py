@@ -42,6 +42,10 @@ class NutritionInfo:
         is available.
     shape_factor : the ratio of true volume to the bounding prism ``area × height``.
         Pizza ≈ 0.9 (near a prism), a half-spherical apple ≈ 0.55, a bowl ≈ 1.0.
+    typical_long_cm : the long side of the top-view bounding box for a typical
+        serving (e.g. ~16 cm for a pizza slice or banana, ~9.8 cm for an apple).
+        The pipeline uses this to self-calibrate cm/px from the recognised class
+        when no plate is in the image.
     """
 
     food_class: str
@@ -52,6 +56,7 @@ class NutritionInfo:
     fat_g_per_100g: float
     typical_height_cm: Optional[float] = None
     shape_factor: Optional[float] = None
+    typical_long_cm: Optional[float] = None
     is_default: bool = False
 
     def mass_from_volume(self, volume_ml: float) -> float:
@@ -115,6 +120,7 @@ def _table() -> dict[str, NutritionInfo]:
                 fat_g_per_100g=float(row["fat_g_per_100g"]),
                 typical_height_cm=_optional_float(row, "typical_height_cm"),
                 shape_factor=_optional_float(row, "shape_factor"),
+                typical_long_cm=_optional_float(row, "typical_long_cm"),
             )
     return table
 

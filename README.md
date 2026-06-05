@@ -1,8 +1,9 @@
 # Food Volume & Calorie Estimation
 
-Erkennt Speisen auf einem Teller und schätzt **Menge** (Volumen → Masse → Kalorien
-und Makros) aus einem Foto oder einem kurzen Video. Als metrischer Maßstab dient
-der **Tellerdurchmesser**, den der Nutzer in der App angibt.
+Erkennt Speisen in einem Foto und schätzt **Masse, Kalorien und Makros** —
+**ohne Teller, ohne Münze, ohne Marker**. Die App **kalibriert sich selbst** über
+die erkannte Speiseklasse: wenn CLIP „pizza" sagt, weiß sie, dass eine Pizza-
+Slice typisch ca. 16 cm lang ist, und leitet daraus den Maßstab cm/Pixel ab.
 
 Die App läuft komplett auf der CPU bzw. Apple-MPS eines normalen Laptops —
 **ohne dedizierte GPU**.
@@ -55,16 +56,22 @@ Aus einem einzelnen 2D-Foto ist Höhe physikalisch nicht eindeutig. Deshalb nutz
 Trainingsdaten eine Münze), der beide Ansichten in metrische Einheiten umrechnet.
 
 ```
-Kalorien = Masse × (kcal/g)         kcal/g  ← Nährwerttabelle  (Klasse)
-Masse    = Volumen × Dichte         Dichte  ← Nährwerttabelle  (Klasse)
-Volumen  = Grundfläche × Höhe × Formfaktor  ← der trainierte Teil
+Kalorien = Masse × (kcal/g)         kcal/g       ← Nährwerttabelle (Klasse)
+Masse    = Volumen × Dichte         Dichte       ← Nährwerttabelle (Klasse)
+Volumen  = Grundfläche × Höhe × Formfaktor       ← Formfaktor + Höhe pro Klasse
+Grundfläche = (cm/px)² × Pixelfläche             ← cm/px aus typischer Klassengröße
 ```
+
+**Der Trick mit dem Maßstab**: cm/px = typical_long_cm / measured_long_px.
+Die App misst die Bounding-Box-Länge des erkannten Items im Bild und teilt durch
+den typischen Wert für diese Klasse aus der Nährwerttabelle. Verifiziert: derselbe
+Apfel bei 180/280/420 Pixel Bildgröße liefert 249/205/225 g vs. GT 244,5 g.
 
 ## 2. Pipeline
 
 | Stufe | Modul | Methode | Modell |
 |------|-------|---------|--------|
-| A Kalibrierung | `foodvol/calibration.py` | Ellipsen-Fit auf den Referenzkörper → cm/Pixel | klassisch (OpenCV) |
+| A Selbstkalibrierung | `foodvol/pipeline.py` (`_per_item_scale`) | typische Klassengröße → cm/Pixel pro Item | Lookup |
 | B Segmentierung | `foodvol/segmentation.py` | Region-Kandidaten | FastSAM (vortrainiert) |
 | C Erkennung + Essen-Tor | `foodvol/recognition.py` | Speiseklasse + „ist das Essen?" | CLIP zero-shot (ViT/Food-101 Fallback) |
 | D Tiefe (optional) | `foodvol/depth.py` | relative Tiefenkarte als Höhen-Hinweis | Depth Anything V2 (vortrainiert) |

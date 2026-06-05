@@ -179,18 +179,31 @@ NUTRITION: dict[str, tuple[float, float, float, float, float]] = {
 
 HEADER = ["class", "density_g_per_ml", "kcal_per_100g",
           "protein_g_per_100g", "carbs_g_per_100g", "fat_g_per_100g",
-          "typical_height_cm", "shape_factor"]
+          "typical_height_cm", "shape_factor", "typical_long_cm"]
 
 
-# Per-class portion priors used when no side view is available and as the shape factor
-# in volume = shape_factor * area * height. Organised by category to avoid repetition;
-# a class without an entry falls back to the trained class-agnostic regressor.
+# Per-class portion priors. Used in two ways:
+#
+#   1. As the metric self-calibration: when no plate is in the image, the
+#      pipeline measures the food's bounding-box long side in pixels, looks up
+#      its typical_long_cm here, and derives cm/px from that. The estimate is
+#      only as good as this number for the user's actual food item.
+#
+#   2. To plug holes when a side view isn't available: typical_height_cm and
+#      shape_factor convert the measured top-view area into a volume.
 #
 # Picking values:
-#   typical_height_cm — how thick a serving usually is, measured top-to-bottom
+#   typical_long_cm   — the long side of the top-view bounding box, in cm
+#                       (ECUSTFD-derived for 19 classes, hand-set for the rest)
+#   typical_height_cm — how thick a typical serving is, top to bottom
 #   shape_factor      — ratio of true volume to its bounding prism (area * height);
 #                       1.0 for a perfect prism, ~0.5 for a half-sphere
 
+# Default priors per category — (typical_height_cm, shape_factor, typical_long_cm).
+# typical_long_cm = length of the long side of the top-view bounding box
+# (i.e. what FastSAM will measure in pixels). For ECUSTFD classes this is the
+# average from artifacts/ecustfd_features_extended.csv. For everything else it
+# is set to a realistic "typical serving" size.
 _ROUND_FRUIT = [
     "apple", "orange", "peach", "mango", "plum", "lemon", "tomato", "pear",
     "qiwi", "kiwi", "litchi", "watermelon", "pineapple",
@@ -198,84 +211,133 @@ _ROUND_FRUIT = [
 _BERRIES = ["strawberry", "blueberry", "raspberry", "cherry", "grape"]
 _ELONGATED = ["banana", "cucumber", "carrot", "corn", "bell_pepper"]
 
-_FLAT_DISHES = [          # roughly a thin prism: area × thin height × ~prism
-    "pizza", "pancakes", "waffles", "tacos", "french_toast",
-    "garlic_bread", "bruschetta", "toast", "spring_rolls",
-]
-_SLICE_DESSERTS = [       # wedge cut from a cake: still ~prism
-    "apple_pie", "cheesecake", "chocolate_cake", "carrot_cake",
-    "red_velvet_cake", "tiramisu", "bread_pudding", "strawberry_shortcake",
-]
-_STACKED = [              # tall, vertically built items
-    "hamburger", "club_sandwich", "breakfast_burrito", "pulled_pork_sandwich",
-    "hot_dog", "lobster_roll_sandwich", "grilled_cheese_sandwich",
-    "chicken_quesadilla",
-]
-_BOWL_DISHES = [          # served in a bowl, depth ≈ bowl depth
-    "soup", "ramen", "pho", "miso_soup", "lobster_bisque", "clam_chowder",
-    "french_onion_soup", "hot_and_sour_soup", "oatmeal", "yogurt",
-    "ice_cream", "frozen_yogurt", "panna_cotta", "chocolate_mousse",
-    "creme_brulee", "bibimbap", "pad_thai", "fried_rice", "paella",
-    "risotto", "macaroni_and_cheese", "shrimp_and_grits",
-]
-_PASTA_PILE = [           # tangled / piled, irregular packing
-    "spaghetti_bolognese", "spaghetti_carbonara", "gnocchi", "ravioli", "pasta",
-    "fish_and_chips", "french_fries", "nachos", "onion_rings", "chicken_wings",
-    "fried_calamari", "samosa", "dumplings", "gyoza", "edamame",
-]
-_MEAT_BLOCK = [           # roughly a flat block (steak, fish fillet)
-    "steak", "filet_mignon", "pork_chop", "baby_back_ribs", "prime_rib",
-    "grilled_salmon", "sashimi", "chicken_breast", "beef", "tuna_tartare",
-]
+_FLAT_DISHES = ["pizza", "pancakes", "waffles", "tacos", "french_toast",
+                "garlic_bread", "bruschetta", "toast", "spring_rolls"]
+_SLICE_DESSERTS = ["apple_pie", "cheesecake", "chocolate_cake", "carrot_cake",
+                   "red_velvet_cake", "tiramisu", "bread_pudding", "strawberry_shortcake"]
+_STACKED = ["hamburger", "club_sandwich", "breakfast_burrito", "pulled_pork_sandwich",
+            "hot_dog", "lobster_roll_sandwich", "grilled_cheese_sandwich",
+            "chicken_quesadilla"]
+_BOWL_DISHES = ["soup", "ramen", "pho", "miso_soup", "lobster_bisque", "clam_chowder",
+                "french_onion_soup", "hot_and_sour_soup", "oatmeal", "yogurt",
+                "ice_cream", "frozen_yogurt", "panna_cotta", "chocolate_mousse",
+                "creme_brulee", "bibimbap", "pad_thai", "fried_rice", "paella",
+                "risotto", "macaroni_and_cheese", "shrimp_and_grits"]
+_PASTA_PILE = ["spaghetti_bolognese", "spaghetti_carbonara", "gnocchi", "ravioli", "pasta",
+               "fish_and_chips", "french_fries", "nachos", "onion_rings", "chicken_wings",
+               "fried_calamari", "samosa", "dumplings", "gyoza", "edamame"]
+_MEAT_BLOCK = ["steak", "filet_mignon", "pork_chop", "baby_back_ribs", "prime_rib",
+               "grilled_salmon", "sashimi", "chicken_breast", "beef", "tuna_tartare"]
 _FLAT_SALAD = ["caesar_salad", "greek_salad", "caprese_salad", "beet_salad",
                "seaweed_salad", "ceviche", "salad", "guacamole", "hummus"]
 
-_SPECIFIC = {             # one-off overrides where the category default isn't right
-    "sushi": (2.5, 0.9),       # bite-sized prisms
-    "donuts": (2.5, 0.7),      # torus, ~half a prism's volume
-    "doughnut": (2.5, 0.7),
-    "bun": (4.0, 0.7),
-    "egg": (4.5, 0.6),         # hard-boiled standing up; for fried egg side view helps
-    "omelette": (1.5, 0.9),
-    "deviled_eggs": (2.5, 0.6),
-    "mooncake": (3.0, 0.85),
-    "macarons": (2.0, 0.85),
-    "cookie": (1.2, 0.9),
-    "chocolate": (1.0, 1.0),   # bar
-    "cheese_plate": (1.5, 0.9),
-    "cheese": (1.5, 0.9),
-    "bread": (4.0, 0.7),
-    "bacon": (0.5, 0.9),       # strips
-    "sausage": (2.5, 0.7),     # cylindrical
-    "fired_dough_twist": (3.0, 0.5),
-    "sachima": (2.5, 0.45),    # porous Chinese sponge snack
-    "banana": (2.5, 0.55),     # elongated, lies flat on the plate
-    "potato": (5.0, 0.55),
-    "sweet_potato": (5.0, 0.55),
-    "broccoli": (4.0, 0.45),   # florets are very porous
-    "mushroom": (3.0, 0.5),
-    "avocado": (4.5, 0.55),
-    "white_rice": (3.0, 0.7),
-    "milk": (5.0, 1.0),        # glass
-    "peas": (2.0, 0.6),
-    "blueberry": (1.0, 0.6),   # tiny
-    "raspberry": (1.5, 0.5),
-    "cherry": (2.0, 0.6),
-    "strawberry": (3.0, 0.55),
-    "grape": (1.8, 0.6),
+# (height_cm, shape_factor, long_cm) — overrides for individual classes.
+# ECUSTFD-derived long_cm values for the 19 trained classes are the empirical means
+# of the bounding-box long side measured on real photos (see notebooks/01_training).
+_SPECIFIC = {
+    # --- ECUSTFD classes: long_cm = empirical mean from extended features ---
+    "apple":             (6.5, 0.55, 9.75),
+    "orange":            (6.5, 0.55, 8.83),
+    "pear":              (6.5, 0.55, 8.82),
+    "peach":             (6.5, 0.55, 7.08),
+    "mango":             (6.5, 0.55, 8.51),
+    "plum":              (6.5, 0.55, 6.58),
+    "lemon":             (6.5, 0.55, 6.91),
+    "tomato":            (6.5, 0.55, 8.16),
+    "qiwi":              (6.5, 0.55, 7.95),
+    "kiwi":              (6.5, 0.55, 7.95),     # ECUSTFD spells it "qiwi"; alias
+    "litchi":            (6.5, 0.55, 5.32),
+    "grape":             (1.8, 0.60, 15.8),     # in ECUSTFD these are clusters
+    "banana":            (2.5, 0.55, 16.36),
+    "egg":               (4.5, 0.60, 6.16),
+    "doughnut":          (2.5, 0.70, 10.01),
+    "donuts":            (2.5, 0.70, 10.01),
+    "fired_dough_twist": (3.0, 0.50, 10.16),
+    "sachima":           (2.5, 0.45, 6.10),
+    "mooncake":          (3.0, 0.85, 5.94),
+    "bun":               (4.0, 0.70, 10.61),
+    "bread":             (4.0, 0.70, 13.43),
+    # --- Common dishes (typical serving sizes from real life) ---
+    "pizza":             (1.5, 0.90, 16.0),     # one slice of a ~30 cm pizza
+    "hamburger":         (5.5, 0.75, 10.0),
+    "club_sandwich":     (5.5, 0.75, 12.0),
+    "hot_dog":           (4.0, 0.70, 16.0),
+    "french_fries":      (3.0, 0.60, 12.0),
+    "sushi":             (2.5, 0.90, 4.0),
+    "ice_cream":         (3.5, 1.00, 10.0),
+    "soup":              (3.5, 1.00, 14.0),     # standard bowl rim
+    "salad":             (3.0, 0.50, 18.0),
+    "spaghetti_bolognese": (3.0, 0.60, 16.0),
+    "pad_thai":          (3.5, 1.00, 18.0),
+    "fried_rice":        (3.5, 1.00, 16.0),
+    "ramen":             (3.5, 1.00, 16.0),
+    "steak":             (2.0, 0.85, 14.0),
+    "grilled_salmon":    (2.0, 0.85, 14.0),
+    "chicken_breast":    (2.5, 0.85, 14.0),
+    "omelette":          (1.5, 0.90, 18.0),
+    "pancakes":          (1.5, 0.90, 14.0),
+    "waffles":           (1.8, 0.85, 14.0),
+    "cookie":            (1.2, 0.90, 6.5),
+    "chocolate":         (1.0, 1.00, 12.0),
+    "cheese_plate":      (1.5, 0.90, 14.0),
+    "cheese":            (1.5, 0.90, 8.0),
+    "bacon":             (0.5, 0.90, 12.0),
+    "sausage":           (2.5, 0.70, 12.0),
+    "deviled_eggs":      (2.5, 0.60, 6.0),
+    "macarons":          (2.0, 0.85, 4.5),
+    # --- Fruit/veg not in ECUSTFD ---
+    "watermelon":        (15.0, 0.55, 25.0),   # whole; a wedge is treated separately
+    "pineapple":         (12.0, 0.60, 18.0),
+    "potato":            (5.0, 0.55, 8.0),
+    "sweet_potato":      (5.0, 0.55, 14.0),
+    "broccoli":          (5.0, 0.45, 12.0),
+    "mushroom":          (3.0, 0.50, 4.5),
+    "avocado":           (5.5, 0.55, 10.0),
+    "cucumber":          (3.5, 0.60, 18.0),
+    "carrot":            (2.5, 0.55, 15.0),
+    "corn":              (4.5, 0.60, 18.0),    # ear of corn
+    "bell_pepper":       (8.0, 0.55, 9.0),
+    "strawberry":        (3.0, 0.55, 3.5),
+    "blueberry":         (1.0, 0.60, 1.2),
+    "raspberry":         (1.5, 0.50, 2.0),
+    "cherry":            (2.0, 0.60, 2.2),
+    # --- Basics ---
+    "white_rice":        (3.0, 0.70, 12.0),
+    "pasta":             (3.0, 0.60, 14.0),
+    "milk":              (10.0, 1.00, 7.0),    # glass, seen from the side
+    "yogurt":            (4.0, 1.00, 9.0),
+    "oatmeal":           (3.0, 1.00, 12.0),
+    "peas":              (2.0, 0.60, 10.0),
+    "toast":             (1.5, 0.70, 11.0),
 }
 
-PORTION_PRIORS: dict[str, tuple[float, float]] = {}
-for c in _ROUND_FRUIT:     PORTION_PRIORS[c] = (6.5, 0.55)
-for c in _BERRIES:         PORTION_PRIORS[c] = (2.0, 0.55)
-for c in _ELONGATED:       PORTION_PRIORS[c] = (3.0, 0.6)
-for c in _FLAT_DISHES:     PORTION_PRIORS[c] = (1.5, 0.9)
-for c in _SLICE_DESSERTS:  PORTION_PRIORS[c] = (4.5, 0.9)
-for c in _STACKED:         PORTION_PRIORS[c] = (5.5, 0.75)
-for c in _BOWL_DISHES:     PORTION_PRIORS[c] = (3.5, 1.0)
-for c in _PASTA_PILE:      PORTION_PRIORS[c] = (3.0, 0.6)
-for c in _MEAT_BLOCK:      PORTION_PRIORS[c] = (2.0, 0.85)
-for c in _FLAT_SALAD:      PORTION_PRIORS[c] = (3.0, 0.5)
+# Category-level defaults (used only if a class isn't in _SPECIFIC).
+# Tuple: (height_cm, shape_factor, long_cm).
+_CATEGORY_DEFAULTS = {
+    "round_fruit":    (6.5, 0.55, 8.5),
+    "berries":        (2.0, 0.55, 3.0),
+    "elongated":      (3.0, 0.60, 15.0),
+    "flat_dish":      (1.5, 0.90, 14.0),
+    "slice_dessert":  (4.5, 0.90, 11.0),
+    "stacked":        (5.5, 0.75, 11.0),
+    "bowl_dish":      (3.5, 1.00, 14.0),
+    "pasta_pile":     (3.0, 0.60, 14.0),
+    "meat_block":     (2.0, 0.85, 12.0),
+    "flat_salad":     (3.0, 0.50, 16.0),
+}
+
+
+PORTION_PRIORS: dict[str, tuple[float, float, float]] = {}
+for c in _ROUND_FRUIT:     PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["round_fruit"]
+for c in _BERRIES:         PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["berries"]
+for c in _ELONGATED:       PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["elongated"]
+for c in _FLAT_DISHES:     PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["flat_dish"]
+for c in _SLICE_DESSERTS:  PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["slice_dessert"]
+for c in _STACKED:         PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["stacked"]
+for c in _BOWL_DISHES:     PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["bowl_dish"]
+for c in _PASTA_PILE:      PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["pasta_pile"]
+for c in _MEAT_BLOCK:      PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["meat_block"]
+for c in _FLAT_SALAD:      PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["flat_salad"]
 PORTION_PRIORS.update(_SPECIFIC)
 
 
@@ -286,9 +348,12 @@ def build(out_path: Path | None = None) -> Path:
         writer.writerow(HEADER)
         for name in sorted(NUTRITION):
             density, kcal, protein, carbs, fat = NUTRITION[name]
-            h, k = PORTION_PRIORS.get(name, (None, None))
-            writer.writerow([name, density, kcal, protein, carbs, fat,
-                             "" if h is None else h, "" if k is None else k])
+            prior = PORTION_PRIORS.get(name)
+            if prior is None:
+                h = k = long_cm = ""
+            else:
+                h, k, long_cm = prior
+            writer.writerow([name, density, kcal, protein, carbs, fat, h, k, long_cm])
     print(f"Wrote {len(NUTRITION)} entries to {out_path} "
           f"({len(PORTION_PRIORS)} with portion priors)")
     return out_path

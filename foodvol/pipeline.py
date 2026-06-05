@@ -25,11 +25,10 @@ import cv2
 import numpy as np
 
 from . import config, nutrition
-from .calibration import Calibration, CalibrationError, calibrate
 from .nutrition import NutritionEstimate
 from .recognition import FoodRecognizer, Recognition
 from .segmentation import FoodSegmenter, InstanceMask
-from .volume import VolumeEstimator, measure_height_cm
+from .volume import VolumeEstimator
 
 ImageInput = Union[str, Path, np.ndarray]
 
@@ -50,6 +49,8 @@ class ItemEstimate:
     mask: InstanceMask
     height_source: str = "geometric_prior"   # 'side_view' | 'class_prior' | 'geometric_prior'
     shape_source: str = "trained"            # 'class' | 'trained'
+    scale_source: str = "class_prior"        # 'class_prior' | 'fallback'
+    cm_per_px: float = 0.0
     alternatives: list[tuple[str, float]] = field(default_factory=list)  # CLIP top-k
 
     @property
@@ -59,12 +60,10 @@ class ItemEstimate:
 
 @dataclass
 class PlateEstimate:
-    """Full result for one plate."""
+    """Full result for one frame (one or more food items)."""
 
     items: list[ItemEstimate] = field(default_factory=list)
-    calibration_top: Optional[Calibration] = None
-    calibration_side: Optional[Calibration] = None
-    height_source: str = "none"
+    height_source: str = "none"           # kept for backward compat with old UI code
     notes: list[str] = field(default_factory=list)
 
     @property
@@ -112,14 +111,11 @@ class FoodVolumePipeline:
     def __init__(
         self,
         volume_model_path: Path = config.VOLUME_MODEL_PATH,
-        use_depth: bool = False,
         device: Optional[str] = None,
     ):
         self.segmenter = FoodSegmenter(device=device)
         self.recognizer = FoodRecognizer(device=device)
         self.volume = VolumeEstimator.load(volume_model_path)
-        self.use_depth = use_depth
-        self._depth = None  # created on demand
         self.device = device
 
     # --- main entry point ------------------------------------------------------
@@ -127,50 +123,33 @@ class FoodVolumePipeline:
         self,
         top_image: ImageInput,
         side_image: Optional[ImageInput] = None,
-        plate_diameter_cm: float = config.REFERENCE_DIAMETERS_CM["plate_dinner"],
         min_confidence: float = 0.0,
     ) -> PlateEstimate:
-        """Estimate per-item mass and calories from a top (and optional side) image."""
+        """Estimate per-item mass and calories — no metric reference required.
+
+        The pipeline runs in this order:
+          1. Segment the image into region candidates (FastSAM).
+          2. Recognise each candidate (CLIP) and drop non-food regions.
+          3. **Self-calibrate per item**: convert pixels to centimetres using the
+             recognised class's ``typical_long_cm`` from the nutrition table.
+          4. Apply class-specific shape factor + height (or the side view) to
+             compute volume → mass → calories & macros.
+
+        ``side_image`` is no longer used for plate calibration; it is still
+        accepted for compatibility but currently ignored.
+        """
+        del side_image  # accepted for backward compatibility, not used yet
         top = _load_bgr(top_image)
         result = PlateEstimate()
+        result.height_source = "class_prior"
 
-        # A. calibrate the top view from the plate (used only for the metric scale).
-        try:
-            calib_top = calibrate(top, plate_diameter_cm, expect="largest")
-        except CalibrationError as exc:
-            raise CalibrationError(
-                f"{exc} Provide a clearer top-down photo with the whole plate visible."
-            ) from exc
-        result.calibration_top = calib_top
-        interior = calib_top.interior_mask(top.shape)
-
-        # Sanity check: if the "plate" fills the frame, the reference is probably not a
-        # real plate -> scale unreliable, and we can't trust the interior to bound food.
-        reference_ok = not (interior.mean() > 0.8 or calib_top.diameter_px > 0.95 * max(top.shape[:2]))
-        if not reference_ok:
-            result.notes.append(
-                "The detected reference fills most of the frame — make sure a round plate "
-                "of the entered diameter is fully visible. Scale and masses may be wrong."
-            )
-
-        # B. height from the side view (or a fallback cue).
-        plate_height_cm, calib_side, height_src = self._estimate_height(
-            side_image, plate_diameter_cm, top, interior
-        )
-        result.calibration_side = calib_side
-        result.height_source = height_src
-        if height_src == "prior":
-            result.notes.append("No usable side view: height estimated from a coarse prior.")
-
-        # C. segment everything, then keep only regions CLIP recognises as food. The food
-        # gate (not the plate interior) is what separates dishes from background/patterns.
-        segments = self.segmenter.segment(
-            top, interior_mask=interior if reference_ok else None)[:MAX_SEGMENTS]
+        # 1. Segment the whole frame; no plate-interior restriction.
+        segments = self.segmenter.segment(top, interior_mask=None)[:MAX_SEGMENTS]
         if not segments:
             result.notes.append("No distinct regions detected.")
             return result
 
-        # D. recognise each region and gate out non-food.
+        # 2. Recognise each candidate; keep food only.
         candidates: list[tuple[InstanceMask, "Recognition"]] = []
         n_rejected = 0
         for inst in segments:
@@ -180,25 +159,22 @@ class FoodVolumePipeline:
             else:
                 n_rejected += 1
 
-        # FastSAM emits the same object at several scales (apple, apple+plate, a slice);
-        # keep the highest-scoring mask per object and drop the others it overlaps.
+        # FastSAM emits the same object at several scales; collapse overlapping ones.
         kept = self._suppress_nested(candidates)
 
-        # E. measure area, height, volume, nutrition for each kept item.
+        # 3 + 4. For each item: self-calibrate, then derive mass and macros.
         for inst, rec in kept:
             info = nutrition.lookup(rec.label)
-            area_cm2 = calib_top.pixel_area_to_cm2(inst.area_px)
+            cm_per_px, scale_src = self._per_item_scale(inst, info)
 
-            # Height priority: measured side view > class-specific prior > geometric prior.
-            if plate_height_cm is not None and plate_height_cm > 0:
-                height_cm, height_src = float(plate_height_cm), "side_view"
-            elif info.typical_height_cm is not None:
+            area_cm2 = (cm_per_px ** 2) * inst.area_px
+
+            if info.typical_height_cm is not None:
                 height_cm, height_src = float(info.typical_height_cm), "class_prior"
             else:
                 height_cm, height_src = self._geometric_height_prior(area_cm2), "geometric_prior"
             height_cm = float(np.clip(height_cm, 0.3, MAX_HEIGHT_CM))
 
-            # Volume: class-specific shape factor when known, else the trained regressor.
             if info.shape_factor is not None:
                 volume_ml = float(info.shape_factor * area_cm2 * height_cm)
                 shape_src = "class"
@@ -207,12 +183,15 @@ class FoodVolumePipeline:
                 shape_src = "trained"
 
             nut = info.for_volume(volume_ml)
-            result.items.append(ItemEstimate(
+            item = ItemEstimate(
                 food_class=rec.label, confidence=rec.score, area_cm2=area_cm2,
                 height_cm=height_cm, volume_ml=volume_ml, nutrition=nut, mask=inst,
                 height_source=height_src, shape_source=shape_src,
                 alternatives=[(l, s) for l, s in rec.top if l != rec.label][:3],
-            ))
+            )
+            item.scale_source = scale_src
+            item.cm_per_px = cm_per_px
+            result.items.append(item)
 
         if not result.items:
             result.notes.append(
@@ -220,7 +199,26 @@ class FoodVolumePipeline:
             )
         elif n_rejected:
             result.notes.append(f"{n_rejected} non-food region(s) were filtered out.")
+        if any(it.scale_source == "fallback" for it in result.items):
+            result.notes.append(
+                "Some items had no typical_long_cm in the nutrition table — their masses "
+                "use a generic fallback scale and may be off."
+            )
         return result
+
+    @staticmethod
+    def _per_item_scale(inst: "InstanceMask", info) -> tuple[float, str]:
+        """Return (cm/px, source) for a single item.
+
+        Compares the item's bounding-box long side in pixels to the class's
+        ``typical_long_cm``. Falls back to a coarse default if the class has no
+        size entry (the resulting mass should then be treated as a guess).
+        """
+        long_side_px = max(inst.bbox[2], inst.bbox[3])  # max(width, height) in px
+        if info.typical_long_cm is not None and long_side_px > 0:
+            return float(info.typical_long_cm / long_side_px), "class_prior"
+        # Fallback: assume the item is roughly 10 cm long. Very rough.
+        return float(10.0 / max(long_side_px, 1)), "fallback"
 
     @staticmethod
     def _suppress_nested(candidates, containment_thresh: float = 0.6):
@@ -241,45 +239,6 @@ class FoodVolumePipeline:
             if not duplicate:
                 kept.append((inst, rec))
         return kept
-
-    # --- height helpers --------------------------------------------------------
-    def _estimate_height(self, side_image, plate_diameter_cm, top, interior):
-        """Return (representative_food_height_cm, side_calibration, source)."""
-        if side_image is not None:
-            side = _load_bgr(side_image)
-            try:
-                calib_side = calibrate(side, plate_diameter_cm, expect="largest")
-            except CalibrationError:
-                calib_side = None
-            if calib_side is not None:
-                side_interior = calib_side.interior_mask(side.shape)
-                food = self.segmenter.segment(side, interior_mask=side_interior)
-                if food:
-                    tallest = max(food, key=lambda i: i.bbox[3])  # largest vertical extent
-                    h_cm = calib_side.pixel_length_to_cm(tallest.bbox[3])
-                    return h_cm, calib_side, "side_view"
-
-        # Fallback: optional monocular depth cue on the top view.
-        if self.use_depth:
-            h = self._depth_height(top, interior)
-            if h is not None:
-                return h, None, "depth"
-
-        # Last resort: a coarse prior (see _item_height for the per-item version).
-        return None, None, "prior"
-
-    def _depth_height(self, top, interior) -> Optional[float]:
-        if self._depth is None:
-            from .depth import DepthEstimator
-            self._depth = DepthEstimator(device=self.device)
-        rel = self._depth.relative_depth(top)
-        if rel is None or interior.sum() < 50:
-            return None
-        ring = interior & ~cv2.erode(interior.astype(np.uint8), np.ones((25, 25), np.uint8)).astype(bool)
-        base = float(np.median(rel[ring])) if ring.sum() else float(np.median(rel[interior]))
-        rise = max(0.0, float(np.percentile(rel[interior], 95)) - base)
-        # Empirical: full relative range ~ a few cm of food relief. Coarse by design.
-        return float(np.clip(rise * 8.0, 0.5, 8.0))
 
     @staticmethod
     def _geometric_height_prior(area_cm2: float) -> float:
