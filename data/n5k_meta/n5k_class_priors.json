@@ -1,0 +1,87 @@
+{
+  "bacon": {
+    "n_samples": 75,
+    "typical_long_cm": 8.407,
+    "mass_per_cm2": 0.702
+  },
+  "pizza": {
+    "n_samples": 75,
+    "typical_long_cm": 7.909,
+    "mass_per_cm2": 1.664
+  },
+  "apple": {
+    "n_samples": 45,
+    "typical_long_cm": 9.75,
+    "mass_per_cm2": 3.688
+  },
+  "broccoli": {
+    "n_samples": 39,
+    "typical_long_cm": 7.909,
+    "mass_per_cm2": 1.807
+  },
+  "sausage": {
+    "n_samples": 37,
+    "typical_long_cm": 9.369,
+    "mass_per_cm2": 2.128
+  },
+  "carrot": {
+    "n_samples": 30,
+    "typical_long_cm": 8.738,
+    "mass_per_cm2": 1.973
+  },
+  "pineapple": {
+    "n_samples": 19,
+    "typical_long_cm": 7.876,
+    "mass_per_cm2": 2.839
+  },
+  "sweet_potato": {
+    "n_samples": 19,
+    "typical_long_cm": 8.009,
+    "mass_per_cm2": 1.767
+  },
+  "watermelon": {
+    "n_samples": 17,
+    "typical_long_cm": 7.86,
+    "mass_per_cm2": 2.9
+  },
+  "chicken_breast": {
+    "n_samples": 15,
+    "typical_long_cm": 7.909,
+    "mass_per_cm2": 3.926
+  },
+  "white_rice": {
+    "n_samples": 14,
+    "typical_long_cm": 8.648,
+    "mass_per_cm2": 1.79
+  },
+  "mushroom": {
+    "n_samples": 10,
+    "typical_long_cm": 7.984,
+    "mass_per_cm2": 1.578
+  },
+  "oatmeal": {
+    "n_samples": 8,
+    "typical_long_cm": 7.951,
+    "mass_per_cm2": 5.227
+  },
+  "tofu": {
+    "n_samples": 7,
+    "typical_long_cm": 7.893,
+    "mass_per_cm2": 2.75
+  },
+  "orange": {
+    "n_samples": 6,
+    "typical_long_cm": 9.484,
+    "mass_per_cm2": 3.098
+  },
+  "avocado": {
+    "n_samples": 6,
+    "typical_long_cm": 7.802,
+    "mass_per_cm2": 1.377
+  },
+  "yogurt": {
+    "n_samples": 5,
+    "typical_long_cm": 8.39,
+    "mass_per_cm2": 3.075
+  }
+}

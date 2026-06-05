@@ -46,6 +46,10 @@ class NutritionInfo:
         serving (e.g. ~16 cm for a pizza slice or banana, ~9.8 cm for an apple).
         The pipeline uses this to self-calibrate cm/px from the recognised class
         when no plate is in the image.
+    mass_per_cm2 : the *areal* density — grams per square centimetre of footprint.
+        When available (from Nutrition5k for 16 common classes) the pipeline
+        skips the volume detour entirely: mass = mass_per_cm2 × area_cm2. This
+        is more direct and more accurate than going through volume × density.
     """
 
     food_class: str
@@ -57,6 +61,7 @@ class NutritionInfo:
     typical_height_cm: Optional[float] = None
     shape_factor: Optional[float] = None
     typical_long_cm: Optional[float] = None
+    mass_per_cm2: Optional[float] = None
     is_default: bool = False
 
     def mass_from_volume(self, volume_ml: float) -> float:
@@ -121,6 +126,7 @@ def _table() -> dict[str, NutritionInfo]:
                 typical_height_cm=_optional_float(row, "typical_height_cm"),
                 shape_factor=_optional_float(row, "shape_factor"),
                 typical_long_cm=_optional_float(row, "typical_long_cm"),
+                mass_per_cm2=_optional_float(row, "mass_per_cm2"),
             )
     return table
 

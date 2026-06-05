@@ -166,23 +166,33 @@ class FoodVolumePipeline:
         for inst, rec in kept:
             info = nutrition.lookup(rec.label)
             cm_per_px, scale_src = self._per_item_scale(inst, info)
-
             area_cm2 = (cm_per_px ** 2) * inst.area_px
 
-            if info.typical_height_cm is not None:
-                height_cm, height_src = float(info.typical_height_cm), "class_prior"
+            # Preferred path: if the class has a Nutrition5k-derived mass_per_cm2,
+            # skip the volume detour and go straight from area to mass.
+            # Otherwise fall back to: volume = shape_factor × area × height, mass = V × density.
+            if info.mass_per_cm2 is not None:
+                mass_g = float(info.mass_per_cm2 * area_cm2)
+                # Synthesise a plausible volume only for display continuity.
+                volume_ml = float(mass_g / info.density_g_per_ml) if info.density_g_per_ml else float("nan")
+                height_cm, height_src = float("nan"), "n5k_areal"
+                shape_src = "n5k_areal"
+                nut = info.for_mass(mass_g)
             else:
-                height_cm, height_src = self._geometric_height_prior(area_cm2), "geometric_prior"
-            height_cm = float(np.clip(height_cm, 0.3, MAX_HEIGHT_CM))
+                if info.typical_height_cm is not None:
+                    height_cm, height_src = float(info.typical_height_cm), "class_prior"
+                else:
+                    height_cm, height_src = self._geometric_height_prior(area_cm2), "geometric_prior"
+                height_cm = float(np.clip(height_cm, 0.3, MAX_HEIGHT_CM))
 
-            if info.shape_factor is not None:
-                volume_ml = float(info.shape_factor * area_cm2 * height_cm)
-                shape_src = "class"
-            else:
-                volume_ml = float(self.volume.predict_volume(area_cm2, height_cm))
-                shape_src = "trained"
+                if info.shape_factor is not None:
+                    volume_ml = float(info.shape_factor * area_cm2 * height_cm)
+                    shape_src = "class"
+                else:
+                    volume_ml = float(self.volume.predict_volume(area_cm2, height_cm))
+                    shape_src = "trained"
+                nut = info.for_volume(volume_ml)
 
-            nut = info.for_volume(volume_ml)
             item = ItemEstimate(
                 food_class=rec.label, confidence=rec.score, area_cm2=area_cm2,
                 height_cm=height_cm, volume_ml=volume_ml, nutrition=nut, mask=inst,

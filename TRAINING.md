@@ -41,10 +41,35 @@ Konzeptuell:
 
 ## 2. Woher die Trainingsdaten kommen
 
-Wir benutzen den öffentlichen Datensatz **ECUSTFD**
-([Liang & Li, 2017](https://arxiv.org/abs/1705.07632)), der genau für dieses
-Problem gebaut wurde: 145 Speise-Portionen, jede gewogen mit einer Küchenwaage
-und volumenmäßig per Wasserverdrängung gemessen.
+Wir benutzen **zwei** öffentliche Datensätze, kombiniert:
+
+### Nutrition5k (Hauptdatensatz, neu hinzugekommen)
+[Thames et al., CVPR 2021](https://arxiv.org/abs/2103.03375). Google's Cafeteria-Datensatz:
+~5000 echte Mahlzeiten, jede Zutat einzeln gewogen, mit Kalorien und Makros.
+Wir laden ein **kuratiertes Subset** (439 Bilder, ~162 MB) — nur Gerichte mit
+**einer Standard-Zutat** (apple, pizza, bacon, broccoli, chicken, rice, …) und
+verfügbarem Top-Down-Foto. Lizenz: CC BY 4.0.
+
+```bash
+python data/download_nutrition5k.py
+```
+
+Daraus berechnen wir pro Klasse den **`mass_per_cm2`**-Faktor — die typische
+Grammzahl pro Quadratzentimeter Fußabdruck. Beispiel:
+```
+apple:          3,69 g/cm²    (kompakter)
+chicken_breast: 3,93 g/cm²
+pizza:          1,66 g/cm²    (flach)
+bacon:          0,70 g/cm²    (dünn)
+```
+Das macht den Volumen-Umweg überflüssig: `Masse = mass_per_cm2 × area_cm2`,
+direkt aus dem Foto.
+
+### ECUSTFD (sekundär, für die Volumen-Pipeline)
+[Liang & Li, 2017](https://arxiv.org/abs/1705.07632). 145 Speise-Portionen, jede
+gewogen plus per Wasserverdrängung volumetrisch gemessen. Enthält nur 19 Klassen,
+darunter manche chinesische Spezialitäten (litchi, mooncake, sachima), aber auch
+die Standards apple/banana/orange/tomato.
 
 ```
 145 Portionen × { Foto von oben + Foto von der Seite + 1-Yuan-Münze als Maßstab + Gewicht + Volumen }

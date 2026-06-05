@@ -145,22 +145,26 @@ Im Browser: Draufsicht (+ optional Seitenansicht **oder ein Video**) hochladen,
 Tellerdurchmesser in cm eingeben, Ergebnis ablesen (Masse, Kalorien und Makros pro
 Speise und gesamt).
 
-**Datensatz laden und Notebooks öffnen:**
+**Datensätze laden:**
 ```bash
-python data/download_ecustfd.py                  # lädt ECUSTFD nach data/ECUSTFD/
-jupyter lab notebooks/                            # Kernel: "Python (ml4b-foodvol)"
+python data/download_ecustfd.py        # ECUSTFD (~125 MB): 145 weighed portions
+python data/download_nutrition5k.py    # Nutrition5k subset (~162 MB): 439 cafeteria dishes
+```
+
+**Notebooks öffnen:**
+```bash
+jupyter lab notebooks/                  # Kernel: "Python (ml4b-foodvol)"
 ```
 
 Zwei Notebooks:
 
 * [`00_feasibility.ipynb`](notebooks/00_feasibility.ipynb) — Phase 0: kann die Methode
-  überhaupt funktionieren? Misst die Baseline-Genauigkeit mit dem ausgelieferten
-  1-Parameter-Modell.
+  überhaupt funktionieren? Misst die Baseline-Genauigkeit auf ECUSTFD.
 * [`01_training.ipynb`](notebooks/01_training.ipynb) — **Voller Trainings-Workflow**:
-  erweiterte Feature-Extraktion, Train/Validation/Test-Split, `GridSearchCV` über fünf
-  Modellfamilien (Ridge, Lasso, Huber, Random Forest, Gradient Boosting, MLP), Lernkurve,
-  Permutation-Importance, einmalige Test-Set-Evaluation. Ergebnis bei aktuellem Datensatz:
-  Gradient Boosting senkt den Volumen-MAPE von 24 % → 19 % gegenüber der Baseline.
+  Train/Validation/Test-Split, `GridSearchCV` über sechs Modellfamilien (Ridge, Lasso,
+  Huber, Random Forest, Gradient Boosting, MLP), Lernkurve, Permutation-Importance,
+  Test-Set-Evaluation. **Plus Nutrition5k-Analyse**: zeigt wie aus 439 echten
+  Cafeteria-Fotos pro Klasse ein direkter Mass-pro-cm²-Faktor gelernt wird.
 
 **Programmatic:**
 ```python

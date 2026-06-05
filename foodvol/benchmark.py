@@ -32,6 +32,8 @@ from .volume import VolumeEstimator, evaluate, measure_footprint_area_cm2, measu
 
 FEATURES_CACHE = config.ARTIFACTS_DIR / "ecustfd_features.csv"
 FEATURES_EXTENDED_CACHE = config.ARTIFACTS_DIR / "ecustfd_features_extended.csv"
+N5K_FEATURES_CACHE = config.ARTIFACTS_DIR / "n5k_features.csv"
+N5K_SCALE_PATH = config.ARTIFACTS_DIR / "n5k_scale.json"
 
 
 def _shape_descriptors(mask) -> dict[str, float]:
@@ -233,6 +235,83 @@ def extract_features_extended(
     df.to_csv(cache_path, index=False)
     if progress:
         print(f"Extracted extended features for {len(df)} portions; cached to {cache_path}")
+    return df
+
+
+def extract_features_n5k(
+    segmenter: Optional[FoodSegmenter] = None,
+    cache_path: Path = N5K_FEATURES_CACHE,
+    use_cache: bool = True,
+    progress: bool = True,
+) -> pd.DataFrame:
+    """Extract per-portion features for the Nutrition5k subset.
+
+    Produces one row per dish::
+
+        dish_id  food_class  area_cm2  long_cm  short_cm  total_mass_g
+        total_kcal  total_fat_g  total_carb_g  total_protein_g
+
+    Uses the fixed ``cm_per_px`` value calibrated once from apple photos
+    (stored in ``artifacts/n5k_scale.json``). Caches to CSV so we don't
+    re-run FastSAM on every training pass.
+    """
+    import json
+    import cv2
+    from .n5k import Nutrition5k
+
+    if use_cache and cache_path.exists():
+        df = pd.read_csv(cache_path)
+        if progress:
+            print(f"Loaded cached N5K features for {len(df)} portions from {cache_path}")
+        return df
+
+    if not N5K_SCALE_PATH.exists():
+        raise FileNotFoundError(
+            f"N5K scale missing at {N5K_SCALE_PATH}. Run the calibration script."
+        )
+    cm_per_px = float(json.load(open(N5K_SCALE_PATH))["cm_per_px"])
+
+    n5k = Nutrition5k()
+    if not n5k.is_available():
+        raise FileNotFoundError(
+            "Nutrition5k not downloaded. Run python data/download_nutrition5k.py."
+        )
+
+    segmenter = segmenter or FoodSegmenter()
+    rows, skipped = [], 0
+    portions = n5k.portions()
+    for k, p in enumerate(portions, 1):
+        img = cv2.imread(str(p.image_path))
+        if img is None:
+            skipped += 1; continue
+        insts = segmenter.segment(img, interior_mask=None,
+                                  min_area_frac=0.01, max_area_frac=0.70)
+        if not insts:
+            skipped += 1; continue
+        # The food is the largest non-background mask.
+        inst = max(insts, key=lambda x: x.area_px)
+        x, y, w, h = inst.bbox
+        long_px, short_px = max(w, h), min(w, h)
+        rows.append({
+            "dish_id": p.dish_id,
+            "food_class": p.food_class,
+            "area_cm2": round(inst.area_px * (cm_per_px ** 2), 3),
+            "long_cm": round(long_px * cm_per_px, 3),
+            "short_cm": round(short_px * cm_per_px, 3),
+            "total_mass_g": p.total_mass_g,
+            "total_kcal": p.total_kcal,
+            "total_fat_g": p.total_fat_g,
+            "total_carb_g": p.total_carb_g,
+            "total_protein_g": p.total_protein_g,
+        })
+        if progress and k % 25 == 0:
+            print(f"  processed {k}/{len(portions)} N5K portions ({len(rows)} ok, {skipped} skipped)")
+
+    df = pd.DataFrame(rows)
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(cache_path, index=False)
+    if progress:
+        print(f"Extracted N5K features for {len(df)} portions; cached to {cache_path}")
     return df
 
 

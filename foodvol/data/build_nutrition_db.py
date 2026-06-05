@@ -179,7 +179,7 @@ NUTRITION: dict[str, tuple[float, float, float, float, float]] = {
 
 HEADER = ["class", "density_g_per_ml", "kcal_per_100g",
           "protein_g_per_100g", "carbs_g_per_100g", "fat_g_per_100g",
-          "typical_height_cm", "shape_factor", "typical_long_cm"]
+          "typical_height_cm", "shape_factor", "typical_long_cm", "mass_per_cm2"]
 
 
 # Per-class portion priors. Used in two ways:
@@ -341,8 +341,25 @@ for c in _FLAT_SALAD:      PORTION_PRIORS[c] = _CATEGORY_DEFAULTS["flat_salad"]
 PORTION_PRIORS.update(_SPECIFIC)
 
 
+def _load_n5k_overrides() -> dict[str, dict]:
+    """Read Nutrition5k-derived class priors if available.
+
+    Produces per-class overrides for ``typical_long_cm`` (measured median in cm)
+    and ``mass_per_cm2`` (the direct grams-per-cm² density learned from real
+    cafeteria photos). These supersede the hand-set defaults below.
+    """
+    path = (Path(__file__).resolve().parent.parent.parent /
+            "data" / "n5k_meta" / "n5k_class_priors.json")
+    if not path.exists():
+        return {}
+    import json
+    return json.load(open(path))
+
+
 def build(out_path: Path | None = None) -> Path:
     out_path = out_path or (Path(__file__).resolve().parent / "nutrition_db.csv")
+    overrides = _load_n5k_overrides()
+    n_n5k_long, n_n5k_mass = 0, 0
     with out_path.open("w", newline="") as fh:
         writer = csv.writer(fh)
         writer.writerow(HEADER)
@@ -353,9 +370,21 @@ def build(out_path: Path | None = None) -> Path:
                 h = k = long_cm = ""
             else:
                 h, k, long_cm = prior
-            writer.writerow([name, density, kcal, protein, carbs, fat, h, k, long_cm])
+
+            mass_per_cm2 = ""
+            ov = overrides.get(name)
+            if ov is not None:
+                long_cm = round(ov["typical_long_cm"], 2)
+                mass_per_cm2 = round(ov["mass_per_cm2"], 3)
+                n_n5k_long += 1
+                n_n5k_mass += 1
+
+            writer.writerow([name, density, kcal, protein, carbs, fat,
+                             h, k, long_cm, mass_per_cm2])
+
     print(f"Wrote {len(NUTRITION)} entries to {out_path} "
-          f"({len(PORTION_PRIORS)} with portion priors)")
+          f"({len(PORTION_PRIORS)} with portion priors; "
+          f"{n_n5k_long} classes calibrated from Nutrition5k)")
     return out_path
 
 
